@@ -1,0 +1,14 @@
+# 自动生成的 requirements.txt
+# 标准库不需要写入，仅列出第三方依赖
+pandas==2.1.4
+numpy==1.26.2
+sqlalchemy==2.0.23
+tqdm
+psutil==5.9.6
+tushare
+akshare
+tenacity
+matplotlib
+optuna
+deap
+pyarrow==14.0.1
