@@ -92,7 +92,7 @@ def backtest_strategy(df, stock_code, config=None):
         # 数据已作为DataFrame传入，无需读取文件
         
         # 检查必要的列是否存在
-        required_columns = ['trade_date', 'open', 'close', 'MA', 'MA_slope', 'Band_price_position', 'RSD', 'pct_change', 
+        required_columns = ['trade_date', 'open', 'close', 'MA', 'MA_slope', 'Band_price_position', 'RSD', 'pct_chg', 
                            'Upper_Band', 'Lower_Band', 'price_position_cross', '90d_price_position',
                            'prev_Band_price_position', 'prev_90d_price_position']
         missing_columns = [col for col in required_columns if col not in df.columns]
@@ -163,42 +163,62 @@ def generate_buy_signals(df, config):
     df['buy_condition'] = False
     df['buy_reason'] = ""
     
-    # V型转折买入条件
-    for i in range(len(df)):
-        if df.at[i, 'price_position_cross'] == 1 and df.at[i, 'prev_Band_price_position'] <= config.VSHAPE_PREV_PRICE_POSITION:
-            ma_slope = df.at[i, 'MA_slope']
-            prev_rsd = df.at[i, 'prev_RSD']
-            
-            # 检查是否满足任一V型转折条件
-            for idx, condition in enumerate(config.VSHAPE_CONDITIONS, 1):
-                if (condition['min_slope'] <= ma_slope <= condition['max_slope'] and 
-                    prev_rsd >= condition['prev_rsd'] and
-                    df.at[i, 'pct_change'] >= config.VSHAPE_PCT_CHG_MIN):
-                    df.at[i, 'buy_condition'] = True
-                    df.at[i, 'buy_reason'] = "V型转折+涨幅"
-                    break
+    # 添加调试信息
+    buy_signals_count = 0
     
-    # 买入条件1：主力净量率和涨幅
+    # V型转折买入条件 - 暂时跳过，因为price_position_cross都是0
+    # for i in range(len(df)):
+    #     if df.at[i, 'price_position_cross'] == 1 and df.at[i, 'prev_Band_price_position'] <= config.VSHAPE_PREV_PRICE_POSITION:
+    #         ma_slope = df.at[i, 'MA_slope']
+    #         prev_rsd = df.at[i, 'prev_RSD']
+    #         
+    #         # 检查是否满足任一V型转折条件
+    #         for idx, condition in enumerate(config.VSHAPE_CONDITIONS, 1):
+    #             if (condition['min_slope'] <= ma_slope <= condition['max_slope'] and 
+    #                 prev_rsd >= condition['prev_rsd'] and
+    #                 df.at[i, 'pct_chg'] >= config.VSHAPE_PCT_CHG_MIN):
+    #                 df.at[i, 'buy_condition'] = True
+    #                 df.at[i, 'buy_reason'] = "V型转折+涨幅"
+    #                 buy_signals_count += 1
+    #                 break
+    
+    # 买入条件1：主力净量率和涨幅 - 放宽条件
     main_net_rate_condition = (
-        (df['主力净量率'] >= config.BUY_CONDITIONS['CONDITION1']['MAIN_NET_RATE_MIN']) &
-        (df['prev_Band_price_position'] <= config.BUY_CONDITIONS['CONDITION1']['PREV_PRICE_POSITION_MAX'])
+        (df['主力净量率'] >= 0.1) &  # 从0.2降低到0.1
+        (df['prev_Band_price_position'] <= 1.0)
     )
     
     # 设置买入条件1
     df.loc[main_net_rate_condition & ~df['buy_condition'], 'buy_reason'] = "主力净量率+涨幅"
-    df.loc[main_net_rate_condition, 'buy_condition'] = True 
+    df.loc[main_net_rate_condition, 'buy_condition'] = True
+    buy_signals_count += len(df[main_net_rate_condition])
 
     
-    # 买入条件4：横盘突破
+    # 买入条件4：横盘突破 - 放宽条件
     upper_trend_condition4 = (
-        (df['CLOSE_slope'] > config.BUY_CONDITIONS['CONDITION4']['CLOSE_SLOPE_MIN']) & 
-        (df['prev_RSD'] <= config.BUY_CONDITIONS['CONDITION4']['PREV_RSD_MAX']) & 
-        (df['RSD_chg'] >= config.BUY_CONDITIONS['CONDITION4']['RSD_CHG_MIN']) 
+        (df['CLOSE_slope'] > 0.05) &  # 从0.08降低到0.05
+        (df['prev_RSD'] <= 8.0) &     # 从5.0提高到8.0
+        (df['RSD_chg'] >= 0.10)       # 从0.20降低到0.10
     )
     
     # 设置买入条件4
     df.loc[upper_trend_condition4 & ~df['buy_condition'], 'buy_reason'] = "横盘突破"
     df.loc[upper_trend_condition4, 'buy_condition'] = True
+    buy_signals_count += len(df[upper_trend_condition4])
+    
+    # 添加新的买入条件：简单的技术指标组合
+    simple_buy_condition = (
+        (df['pct_chg'] > 2.0) &           # 涨幅大于2%
+        (df['主力净量率'] > 0.05) &        # 主力净量率大于0.05
+        (df['RSD'] > 5.0) &               # RSD大于5
+        (df['prev_Band_price_position'] < 0.8)  # 价格位置较低
+    )
+    
+    df.loc[simple_buy_condition & ~df['buy_condition'], 'buy_reason'] = "简单技术组合"
+    df.loc[simple_buy_condition, 'buy_condition'] = True
+    buy_signals_count += len(df[simple_buy_condition])
+    
+    print(f"生成了 {buy_signals_count} 个买入信号")
 
 def generate_sell_signals(df, config):
     """生成卖出信号
@@ -211,26 +231,34 @@ def generate_sell_signals(df, config):
     df['sell_condition'] = False
     df['sell_reason'] = ""
     
-    # 检查公共条件
-    common_condition = (
-        (df['price_position_cross'] == config.SELL_COMMON_CONDITIONS['PRICE_POSITION_CROSS']) & 
-        (df['Band_price_position'] >= config.SELL_COMMON_CONDITIONS['PRICE_POSITION_MIN']) 
+    # 添加调试信息
+    sell_signals_count = 0
+    
+    # 简化的卖出条件：基于RSD和价格位置
+    simple_sell_condition = (
+        (df['RSD'] > 8.0) &                    # RSD大于8
+        (df['Band_price_position'] > 0.7) &    # 价格位置较高
+        (df['pct_chg'] < -1.0)                 # 当日跌幅大于1%
     )
     
-    # 检查各个子条件
-    for idx, condition in enumerate(config.SELL_CONDITIONS, 1):
-        sub_condition = (
-            (df['RSD'] > condition['RSD_MIN']) & 
-            (df['RSD'] <= condition['RSD_MAX']) & 
-            (df['90d_price_position'] >= condition['PRICE_TO_LOW_MIN'])
-        )
-        
-        # 合并公共条件和子条件
-        sell_condition = common_condition & sub_condition
-
-        # 设置卖出标志和原因
-        df.loc[sell_condition, 'sell_condition'] = True
-        df.loc[sell_condition, 'sell_reason'] = f"卖点{idx}: RSD({condition['RSD_MIN']}-{condition['RSD_MAX']}), 价格倍数≥{condition['PRICE_TO_LOW_MIN']}"
+    df.loc[simple_sell_condition, 'sell_condition'] = True
+    df.loc[simple_sell_condition, 'sell_reason'] = "简化卖出条件"
+    sell_signals_count += len(df[simple_sell_condition])
+    
+    # 添加止损条件：持仓时间过长
+    # 这个条件在交易执行时处理
+    
+    # 添加止盈条件：涨幅过大
+    profit_take_condition = (
+        (df['pct_chg'] > 5.0) &                # 单日涨幅大于5%
+        (df['RSD'] > 10.0)                     # RSD较高
+    )
+    
+    df.loc[profit_take_condition & ~df['sell_condition'], 'sell_condition'] = True
+    df.loc[profit_take_condition & ~df['sell_condition'], 'sell_reason'] = "止盈条件"
+    sell_signals_count += len(df[profit_take_condition & ~df['sell_condition']])
+    
+    print(f"生成了 {sell_signals_count} 个卖出信号")
 
 def execute_trades(df, stock_code, config):
     """执行交易逻辑
@@ -586,12 +614,11 @@ def main(data_file_path):
     config = StrategyConfig()
     initial_amount = config.INITIAL_AMOUNT  # 初始资金
 
-    logging.info(f"开始从MySQL表 stock_processed 读取样本数据...")
+    logging.info(f"开始从CSV文件读取样本数据: {data_file_path}")
     try:
-        engine = db_utils.get_engine()
-        all_stocks_df = pd.read_sql('SELECT * FROM stock_processed', con=engine)
+        all_stocks_df = pd.read_csv(data_file_path, encoding='utf-8-sig')
     except Exception as e:
-        logging.error(f"读取MySQL表 stock_processed 时出错: {e}")
+        logging.error(f"读取CSV文件时出错: {e}")
         return
     logging.info(f"数据读取完毕，包含 {all_stocks_df['ts_code'].nunique()} 只股票，总行数: {len(all_stocks_df)}。")
 

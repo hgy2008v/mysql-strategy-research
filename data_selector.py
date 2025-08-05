@@ -1,7 +1,6 @@
 import os
 import logging
 import pandas as pd
-import db_utils
 
 # 设置日志记录
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -94,9 +93,8 @@ def select_samples(input_dir, output_dir, stock_codes=None, sample_size=Config.D
             logging.error(f"输入文件未找到: {input_file_path}")
             return
 
-        logging.info(f"开始从MySQL表 stock_processed 读取数据...")
-        engine = db_utils.get_engine()
-        df = pd.read_sql('SELECT * FROM stock_processed', con=engine)
+        logging.info(f"开始从 {input_file_path} 读取数据...")
+        df = pd.read_csv(input_file_path, encoding='utf-8-sig')
         logging.info("数据读取完毕。")
         
         output_filename = ""

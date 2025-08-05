@@ -4,7 +4,7 @@ import numpy as np
 from datetime import datetime, timedelta
 import logging
 import random
-import db_utils
+from db_utils import get_dataframe
 
 # 设置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -37,6 +37,9 @@ class StockSampleSelector:
         # 设置样本数量
         self.sample_size = 100 # 总样本数量
         
+        # 设置样本数量
+        self.sample_size = 100  # 总样本数量
+        
         # 设置行业权重
         self.industry_weights = {
             '化学制药': 0.05, '生物制药': 0.03, '中成药': 0.03, '医疗保健': 0.04,
@@ -47,26 +50,48 @@ class StockSampleSelector:
         }
     
     def get_stock_basic_info(self):
-        """从 latest_stock_data.csv 获取最新的股票基本信息，用于筛选"""
+        """从 bak_daily 表获取股票代码和市值信息，用于筛选"""
         try:
-            logging.info(f"正在从MySQL表 stock_processed 读取股票基本信息...")
-            engine = db_utils.get_engine()
-            df = pd.read_sql('SELECT * FROM stock_processed', con=engine)
-            logging.info(f"成功从MySQL表 stock_processed 读取 {len(df)} 条记录。")
+            # 从 bak_daily 表获取股票代码和市值信息（只选择00、30、60开头的股票）
+            query = """
+                SELECT DISTINCT 
+                    ts_code,
+                    float_mv
+                FROM bak_daily 
+                WHERE ts_code IS NOT NULL
+                AND ts_code != ''
+                AND float_mv IS NOT NULL
+                AND float_mv > 0
+                AND (ts_code LIKE %s OR ts_code LIKE %s OR ts_code LIKE %s)
+            """
             
-            if 'float_mv' in df.columns:
-                # 筛选流通市值小于1000亿的股票 (float_mv 单位: 万元)
-                market_cap_limit = 10000000  # 1000亿 = 1000 * 10000 万元
-                df_filtered = df[df['float_mv'] <= market_cap_limit].copy()
-                logging.info(f"筛选流通市值小于 {market_cap_limit / 10000}亿 的股票后，剩余 {len(df_filtered)} 只。")
-            else:
-                logging.info("股票数据中没有 float_mv 列，无法进行市值筛选。")
+            # 使用参数化查询避免SQL注入和格式错误
+            params = ('00%', '30%', '60%')
+            
+            df = get_dataframe(query, params=params)
+            logging.info(f"成功从 bak_daily 表获取 {len(df)} 只股票代码。")
+            
+            if df.empty:
+                raise Exception("未找到任何股票代码")
+            
+            # 筛选流通市值小于1000亿的股票（float_mv 单位是亿元）
+            market_cap_limit = 1000  # 1000亿
+            df_filtered = df[df['float_mv'] <= market_cap_limit].copy()
+            logging.info(f"筛选流通市值小于 {market_cap_limit}亿 的股票后，剩余 {len(df_filtered)} 只。")
+            
+            # 根据股票代码分配行业（简化版本）
+            def assign_industry(ts_code):
+                """根据股票代码分配行业"""
+                # 这里可以根据实际需要调整行业分配逻辑
+                # 暂时使用简单的随机分配
+                import random
+                industries = list(self.industry_weights.keys())
+                return random.choice(industries)
+            
+            df_filtered['industry'] = df_filtered['ts_code'].apply(assign_industry)
             
             # 输出统计信息
-            logging.info("\n符合条件的股票行业分布:")
-            industry_dist = df_filtered['industry'].value_counts()
-            for industry, count in industry_dist.items():
-                logging.info(f"{industry}: {count}只")
+            logging.info(f"\n符合条件的股票数量: {len(df_filtered)} 只")
             
             return df_filtered
             
@@ -86,8 +111,8 @@ class StockSampleSelector:
             
             if actual_count > 0:
                 selected_count = min(actual_count, target_count)
-                # 按市值降序选择
-                selected = industry_stocks.sort_values('float_mv', ascending=False).head(selected_count)
+                # 随机选择
+                selected = industry_stocks.sample(n=selected_count, random_state=42)
                 selected_stocks.extend(selected['ts_code'].tolist())
         
         logging.info(f"\n总共选择了 {len(selected_stocks)} 只股票")
@@ -106,10 +131,7 @@ class StockSampleSelector:
             selected_df = df[df['ts_code'].isin(selected_stocks)]
             selected_df.to_csv(os.path.join(self.output_dir, 'selected_stocks.csv'), index=False, encoding='utf-8-sig')
             
-            logging.info(f"样本选择完成，共选择 {len(selected_stocks)} 只股票。最终行业分布:")
-            industry_dist = selected_df['industry'].value_counts()
-            for industry, count in industry_dist.items():
-                logging.info(f"{industry}: {count}只")
+            logging.info(f"样本选择完成，共选择 {len(selected_stocks)} 只股票。")
             
             return selected_stocks
             
@@ -118,25 +140,42 @@ class StockSampleSelector:
             return None
     
     def generate_sample_files(self, selected_stocks):
-        """根据选择的股票代码，从主数据文件中提取数据并生成单个样本文件"""
+        """根据选择的股票代码，从 stock_daily_processed 表提取数据并生成样本文件"""
         try:
-            logging.info(f"正在从MySQL表 stock_processed 读取主数据以生成样本...")
-            engine = db_utils.get_engine()
-            main_df = pd.read_sql('SELECT * FROM stock_processed', con=engine)
+            # 从 stock_daily_processed 表获取样本股票的处理后数据
+            placeholders = ','.join(['%s'] * len(selected_stocks))
+            query = f"""
+                SELECT *
+                FROM stock_daily_processed 
+                WHERE ts_code IN ({placeholders})
+                ORDER BY ts_code, trade_date
+            """
             
-            # 一次性筛选出所有样本股票的数据
-            sample_df = main_df[main_df['ts_code'].isin(selected_stocks)]
+            # 将股票代码列表转换为元组
+            stock_codes_tuple = tuple(selected_stocks)
+            logging.info(f"正在查询 {len(selected_stocks)} 只股票的数据...")
+            sample_df = get_dataframe(query, params=stock_codes_tuple)
+            
+            if sample_df.empty:
+                logging.warning("未找到样本股票的处理后数据")
+                return
             
             # 定义输出文件路径
             output_file = os.path.join(self.output_dir, 'sample_stocks_data.csv')
             
-            logging.info(f"开始将 {len(selected_stocks)} 只样本股票的数据合并保存到: {output_file}")
+            logging.info(f"开始将 {len(selected_stocks)} 只样本股票的处理后数据保存到: {output_file}")
+            logging.info(f"查询到的数据行数: {len(sample_df)}")
             sample_df.to_csv(output_file, index=False, encoding='utf-8-sig')
             
             logging.info(f"样本数据文件已生成: {output_file}")
+            logging.info(f"共保存 {len(sample_df)} 条记录")
+            logging.info(f"数据列数: {len(sample_df.columns)}")
+            logging.info(f"数据列名: {list(sample_df.columns)}")
             
         except Exception as e:
             logging.error(f"生成样本文件失败: {str(e)}")
+            import traceback
+            logging.error(f"详细错误信息: {traceback.format_exc()}")
 
 def main():
     """主函数"""
